@@ -67,7 +67,8 @@ using handle_type = void*;
 using symbol_type = void*;
 #endif
 
-handle_type load_library(std::string_view path) {
+inline handle_type load_library(std::string_view path) {
+  // TODO error handling
 #if (defined(_WIN32) || defined(_WIN64))
   return ::LoadLibraryA(std::string{path}.c_str());
 #else
@@ -75,7 +76,8 @@ handle_type load_library(std::string_view path) {
 #endif
 }
 
-void unload_library(handle_type handle) {
+inline void unload_library(handle_type handle) {
+  // TODO error handling
 #if (defined(_WIN32) || defined(_WIN64))
   ::FreeLibrary(handle);
 #else
@@ -83,11 +85,16 @@ void unload_library(handle_type handle) {
 #endif
 }
 
-symbol_type get_symbol(handle_type handle, std::string_view name) {
+inline symbol_type get_symbol(handle_type handle, std::string_view name) {
+  // TODO error handling
 #if (defined(_WIN32) || defined(_WIN64))
   return ::GetProcAddress(handle, std::string{name}.c_str());
 #else
-  return ::dlsym(handle, std::string{name}.c_str());
+  void* addr = ::dlsym(handle, std::string{name}.c_str());
+  if (addr == nullptr) {
+    // dlerror => throw
+  }
+  return addr;
 #endif
 }
 
@@ -139,66 +146,38 @@ static_string(char const (&)[N]) -> static_string<N - 1>;
 }  // namespace util
 
 namespace reflection {
+#  if __cpp_structured_bindings < 202411L
 namespace arity_impl {
 struct Universal {
   template <typename T>
-  explicit(false) constexpr operator T();  // NOLINT
+  explicit(false) operator T() const noexcept {
+    static_assert(false, "Universal cannot be used in evaluated contexts");
+  }
 };
 
 template <typename T>
-  requires std::is_aggregate_v<T>
-struct Arity {
-  template <typename... Fillers>
-  static consteval auto array_length(auto... parameters) {
-    if constexpr (requires { T{parameters..., {Fillers{}..., Universal{}}}; }) {
-      return array_length<Fillers..., Universal>(parameters...);
-    } else {
-      return sizeof...(Fillers);
-    }
+  requires(std::is_aggregate_v<T>)
+consteval auto compute_arity(auto... parameters) {
+  // this does not work if T has C-array members
+  // however, for the intended use case all members are pointers anyway
+  if constexpr (requires { T{parameters...}; }) {
+    return compute_arity<T>(parameters..., Universal{});
+  } else {
+    return sizeof...(parameters) - 1;
   }
-
-  static consteval auto arity_simple(auto... parameters) {
-    if constexpr (requires { T{parameters..., Universal{}}; }) {
-      return arity_simple(parameters..., Universal{});
-    } else {
-      return sizeof...(parameters);
-    }
-  }
-
-  template <typename... Trails>
-  static consteval auto arity_simple_ag(auto... parameters) {
-    if constexpr (requires { T{parameters..., {Universal{}, Universal{}}, Trails{}..., Universal{}}; }) {
-      return arity_simple_ag<Trails..., Universal>(parameters...);
-    } else {
-      return sizeof...(parameters) + sizeof...(Trails) + 1;
-    }
-  }
-
-  static consteval auto value(std::size_t minus = 0, auto... parameters) {
-    if constexpr (requires { T{parameters..., {Universal{}, Universal{}}}; }) {
-      if constexpr (arity_simple_ag(parameters...) != arity_simple(parameters...)) {
-        minus += array_length(parameters...) - 1;
-      }
-
-      return value(minus, parameters..., Universal{});
-    } else if constexpr (requires { T{parameters..., Universal{}}; }) {
-      return value(minus, parameters..., Universal{});
-    } else {
-      return sizeof...(parameters) - minus;
-    }
-  }
-};
+}
 }  // namespace arity_impl
 
 template <typename T>
   requires std::is_aggregate_v<T>
-inline constexpr std::size_t arity = arity_impl::Arity<T>::value();
+inline constexpr std::size_t arity = arity_impl::compute_arity<T>();
 
 namespace visit_impl {
 template <typename T, typename V>
   requires(std::is_aggregate_v<std::remove_cvref_t<T> > && !std::is_array_v<std::remove_cvref_t<T> >)
 constexpr auto visit_aggregate(V visitor, T&& object) {
   constexpr auto member_count = arity<std::remove_cvref_t<T> >;
+  // this is generated
   if constexpr (member_count == 0) {
     return visitor();
   } else if constexpr (member_count == 1) {
@@ -764,11 +743,17 @@ constexpr auto visit_aggregate(V visitor, T&& object) {
   }
 }
 }  // namespace visit_impl
+#  endif
 
 template <typename T, typename V>
   requires(std::is_aggregate_v<std::remove_cvref_t<T> > && !std::is_array_v<std::remove_cvref_t<T> >)
 constexpr auto visit_aggregate(V visitor, T&& object) {
+#  if __cpp_structured_bindings >= 202411L
+  auto& [... members] = object;
+  return visitor(members...);
+#  else
   return visit_impl::visit_aggregate(visitor, std::forward<T>(object));
+#  endif
 }
 
 namespace name_impl {
@@ -818,18 +803,18 @@ constexpr auto to_addr_tuple(T&& object) {
       std::forward<T>(object));
 }
 
-#if defined(__clang__)
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wundefined-var-template"
-#endif
+#  if defined(__clang__)
+#    pragma clang diagnostic push
+#    pragma clang diagnostic ignored "-Wundefined-var-template"
+#  endif
 
 template <typename T, std::size_t Idx>
   requires(std::is_aggregate_v<T> && !std::is_array_v<T>)
 inline constexpr auto member_name = name_from_subobject<T, get<Idx>(to_addr_tuple(fake_obj<T>.value))>();
 
-#if defined(__clang__)
-#pragma clang diagnostic pop
-#endif
+#  if defined(__clang__)
+#    pragma clang diagnostic pop
+#  endif
 }  // namespace name_impl
 
 template <typename T>
