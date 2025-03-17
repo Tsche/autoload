@@ -23,6 +23,7 @@ SOFTWARE.
 */
 #pragma once
 #include <algorithm>
+#include <exception>
 #include <string_view>
 #include <string>
 #include <type_traits>
@@ -56,7 +57,13 @@ SOFTWARE.
 #  include <dlfcn.h>
 #endif
 
+#include <stdexcept>
+
 namespace erl {
+
+struct LibraryError : std::runtime_error {
+  using std::runtime_error::runtime_error;
+};
 
 namespace platform {
 #if (defined(_WIN32) || defined(_WIN64))
@@ -67,17 +74,54 @@ using handle_type = void*;
 using symbol_type = void*;
 #endif
 
-inline handle_type load_library(std::string_view path) {
-  // TODO error handling
 #if (defined(_WIN32) || defined(_WIN64))
-  return ::LoadLibraryA(std::string{path}.c_str());
+namespace _impl {
+inline void local_free(void* ptr) {
+  ::LocalFree(ptr);
+}
+}  // namespace _impl
+#endif
+
+inline std::string get_last_error() {
+#if (defined(_WIN32) || defined(_WIN64))
+  DWORD error_id = GetLastError();
+  if (error_id == 0) {
+    return {};
+  }
+
+  LPTSTR buffer = nullptr;
+  auto size =
+      FormatMessageA(FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS, NULL,
+                     error_id, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), (LPTSTR)&buffer, 0, NULL);
+
+  if (size == 0) {
+    return std::format("Invalid error code {}", error_id);
+  }
+  auto msg = std::unique_ptr<LPTSTR, void (*)(ptr)>(buffer, &_impl::local_free);
+  return std::string(msg.get(), size);
 #else
-  return ::dlopen(std::string{path}.c_str(), RTLD_NOW | RTLD_LOCAL);
+  // TODO this might not be thread-safe
+  char const* error_msg = ::dlerror();
+  if (error_msg == nullptr) {
+    return {};
+  }
+  return error_msg;
 #endif
 }
 
+inline handle_type load_library(std::string_view path) {
+#if (defined(_WIN32) || defined(_WIN64))
+  handle_type handle = ::LoadLibraryExA(std::string{path}.c_str(), NULL, NULL);
+#else
+  handle_type handle = ::dlopen(std::string{path}.c_str(), RTLD_NOW | RTLD_LOCAL);
+#endif
+  if (!static_cast<bool>(handle)) {
+    throw LibraryError(get_last_error());
+  }
+  return handle;
+}
+
 inline void unload_library(handle_type handle) {
-  // TODO error handling
 #if (defined(_WIN32) || defined(_WIN64))
   ::FreeLibrary(handle);
 #else
@@ -86,16 +130,16 @@ inline void unload_library(handle_type handle) {
 }
 
 inline symbol_type get_symbol(handle_type handle, std::string_view name) {
-  // TODO error handling
 #if (defined(_WIN32) || defined(_WIN64))
-  return ::GetProcAddress(handle, std::string{name}.c_str());
+  symbol_type addr = ::GetProcAddress(handle, std::string{name}.c_str());
 #else
-  void* addr = ::dlsym(handle, std::string{name}.c_str());
-  if (addr == nullptr) {
-    // dlerror => throw
+  symbol_type addr = ::dlsym(handle, std::string{name}.c_str());
+#endif
+
+  if (!bool(addr)) {
+    throw LibraryError(get_last_error());
   }
   return addr;
-#endif
 }
 
 }  // namespace platform
