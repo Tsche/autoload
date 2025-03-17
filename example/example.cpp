@@ -1,4 +1,4 @@
-#include <autoload.h>
+#include <autoload.hpp>
 #include <memory>
 
 struct TestInterface {

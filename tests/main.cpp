@@ -1,7 +1,7 @@
 #include <gtest/gtest.h>
 #include <gmock/gmock.h>
 
-#include <autoload.h>
+#include <autoload.hpp>
 
 TEST(Dummy, AlwaysPasses) {
   EXPECT_TRUE(true);
